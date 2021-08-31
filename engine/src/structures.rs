@@ -92,8 +92,6 @@ pub struct IndexDeclaration {
 
 impl IndexDeclaration {
     pub(crate) fn into_schema(self) -> LoadedIndex {
-        let mut indexed_text_fields = vec![];
-        let mut fuzzy_search_fields = vec![];
         let mut schema = InternalSchemaBuilder::new();
 
         let opts = IntOptions::default()
@@ -130,31 +128,24 @@ impl IndexDeclaration {
                     schema.add_text_field(&name, opts);
                 },
                 FieldDeclaration::Text { stored } => {
-                    let field = if !(self.use_fast_fuzzy && crate::correction::enabled()) {
+                    if !(self.use_fast_fuzzy && crate::correction::enabled()) {
                         let mut opts = TEXT;
 
                         if stored {
                             opts = opts | STORED;
                         }
 
-                        schema.add_text_field(&name, opts)
+                        schema.add_text_field(&name, opts);
                     } else {
                         if stored {
                             schema.add_text_field(&name, STORED);
                         }
 
-                        indexed_text_fields.push(name.clone());
 
                         let id = hash(&name);
-                        schema.add_text_field(&format!("_{}", id), TEXT)
+                        let name = format!("_{}", id);
+                        schema.add_text_field(&name, TEXT);
                     };
-
-                    let boost = match self.boost_fields.get(&name) {
-                        Some(b) => *b,
-                        None => 0f32,
-                    };
-
-                    fuzzy_search_fields.push((field, boost));
                 },
             };
         }
@@ -170,8 +161,6 @@ impl IndexDeclaration {
             schema: schema.build(),
             boost_fields: self.boost_fields,
             set_conjunction_by_default: self.set_conjunction_by_default,
-            indexed_text_fields,
-            fuzzy_search_fields,
             use_fast_fuzzy: self.use_fast_fuzzy,
             strip_stop_words: self.strip_stop_words,
         }
@@ -222,12 +211,6 @@ pub struct LoadedIndex {
     /// If set to true, this switches Tantivy's default query parser
     /// behaviour to use AND instead of OR.
     pub(crate) set_conjunction_by_default: bool,
-
-    /// The set of fields which are indexed.
-    pub(crate) indexed_text_fields: Vec<String>,
-
-    /// The set of fields which are indexed.
-    pub(crate) fuzzy_search_fields: Vec<(Field, Score)>,
 
     /// Whether or not to use the fast fuzzy system or not.
     ///
