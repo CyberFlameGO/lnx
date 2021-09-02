@@ -20,11 +20,12 @@ use tantivy::schema::{
     STRING,
     TEXT,
 };
-use tantivy::{DateTime, Score, Index};
+use tantivy::{DateTime, Index};
 
 use crate::helpers::hash;
+use crate::index::queries::QueryContext;
 
-static INDEX_DATA_PATH: &str = "./lnx/index-data";
+pub(crate) static INDEX_DATA_PATH: &str = "./lnx/index-data";
 
 /// A declared schema field type.
 ///
@@ -80,17 +81,11 @@ pub struct IndexDeclaration {
     writer_threads: Option<usize>,
     max_concurrency: u32,
     reader_threads: Option<u32>,
-    search_fields: Vec<String>,
-    #[serde(default)]
-    boost_fields: HashMap<String, tantivy::Score>,
     storage_type: IndexStorageType,
     fields: HashMap<String, FieldDeclaration>,
-    #[serde(default)]
-    set_conjunction_by_default: bool,
-    #[serde(default)]
-    use_fast_fuzzy: bool,
-    #[serde(default)]
-    strip_stop_words: bool,
+
+    #[serde(flatten)]
+    query_ctx: QueryContext,
 }
 
 impl IndexDeclaration {
@@ -111,12 +106,8 @@ impl IndexDeclaration {
             writer_threads: self.writer_threads.unwrap_or_else(|| num_cpus::get()),
             max_concurrency: self.max_concurrency,
             reader_threads: self.reader_threads.unwrap_or(1),
-            search_fields: self.search_fields,
+            query_ctx: self.query_ctx,
             index,
-            boost_fields: self.boost_fields,
-            set_conjunction_by_default: self.set_conjunction_by_default,
-            use_fast_fuzzy: self.use_fast_fuzzy,
-            strip_stop_words: self.strip_stop_words,
         })
     }
 
@@ -194,12 +185,8 @@ impl IndexDeclaration {
             writer_threads: self.writer_threads.unwrap_or_else(|| num_cpus::get()),
             max_concurrency: self.max_concurrency,
             reader_threads: self.reader_threads.unwrap_or(1),
-            search_fields: self.search_fields,
+            query_ctx: self.query_ctx,
             index,
-            boost_fields: self.boost_fields,
-            set_conjunction_by_default: self.set_conjunction_by_default,
-            use_fast_fuzzy: self.use_fast_fuzzy,
-            strip_stop_words: self.strip_stop_words,
         })
     }
 }
@@ -231,31 +218,11 @@ pub struct LoadedIndex {
     /// It will however, decrease the average response time.
     pub(crate) reader_threads: u32,
 
-    /// The fields what are actually searched via tantivy.
-    ///
-    /// These values need to either be a fast field (ints) or TEXT.
-    pub(crate) search_fields: Vec<String>,
-
     /// The defined tantivy schema.
     pub(crate) index: Index,
 
-    /// A set of fields to boost by a given factor.
-    pub(crate) boost_fields: HashMap<String, Score>,
-
-    /// If set to true, this switches Tantivy's default query parser
-    /// behaviour to use AND instead of OR.
-    pub(crate) set_conjunction_by_default: bool,
-
-    /// Whether or not to use the fast fuzzy system or not.
-    ///
-    /// The fast fuzzy system must be enabled on the server overall
-    /// for this feature.
-    pub(crate) use_fast_fuzzy: bool,
-
-    /// Whether or not to strip out stop words in fuzzy queries.
-    ///
-    /// This only applies to the fast-fuzzy query system.
-    pub(crate) strip_stop_words: bool,
+    /// Any given context to pass to the query handler.
+    pub(crate) query_ctx: QueryContext,
 }
 
 /// The mode of the query.

@@ -1,7 +1,11 @@
 use std::sync::Arc;
+use std::borrow::Borrow;
 
+use chrono::Utc;
 use anyhow::{Error, Result};
 use serde::Serialize;
+use tokio::sync::{oneshot, Semaphore};
+
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{
     BooleanQuery,
@@ -15,15 +19,13 @@ use tantivy::query::{
     TermQuery,
 };
 use tantivy::schema::{Field, FieldType, IndexRecordOption, NamedFieldDocument, Schema, Value};
-use tantivy::{DocAddress, Executor, IndexReader, LeasedItem, Score, Searcher, Term};
-use tokio::sync::{oneshot, Semaphore};
+use tantivy::{DocAddress, Executor, IndexReader, LeasedItem, Score, Searcher, Term, Index};
 
 use crate::correction::{self, correct_sentence};
 use crate::structures::{QueryMode, QueryPayload};
+use crate::index::queries::{QueryContext, QueryHandler};
 use super::executor::ExecutorPool;
 
-use std::borrow::Borrow;
-use chrono::Utc;
 
 /// Attempts to get a document otherwise sending an error
 /// back to the resolve channel.
@@ -35,7 +37,7 @@ macro_rules! try_get_doc {
             $executor,
         );
 
-        let res: Vec<(f32, DocAddress)> = match res {
+        let res: Vec<(Score, DocAddress)> = match res {
             Err(e) => {
                 let _ = $resolve.send(Err(Error::from(e)));
                 return;
@@ -94,25 +96,11 @@ pub(super) struct IndexReaderHandler {
     /// The execution thread pool.
     thread_pool: rayon::ThreadPool,
 
-    /// The configured query parser pre-weighted.
-    parser: Arc<QueryParser>,
-
-    /// The set of indexed fields to search in a given query.
-    search_fields: Arc<Vec<(Field, Score)>>,
-
     /// A cheaply cloneable schema reference.
     schema: Schema,
 
-    /// Whether or not to use the fast fuzzy symspell correction system or not.
-    ///
-    /// This greatly improves the performance of searching at the cost
-    /// of document indexing time and memory usage (standard dict set uses 1.2GB generally).
-    use_fast_fuzzy: bool,
-
-    /// Whether or not to strip out stop words in fuzzy queries.
-    ///
-    /// This only applies to the fast-fuzzy query system.
-    strip_stop_words: bool,
+    /// The query handler which manages any context for producing queries.
+    query_handler: QueryHandler,
 }
 
 impl IndexReaderHandler {
@@ -125,16 +113,14 @@ impl IndexReaderHandler {
         max_concurrency: usize,
         reader: IndexReader,
         reader_threads: usize,
-        parser: QueryParser,
-        search_fields: Vec<(Field, Score)>,
-        schema_copy: Schema,
-        use_fast_fuzzy: bool,
-        strip_stop_words: bool,
+        index: &Index,
+        query_ctx: &QueryContext,
     ) -> Result<Self> {
-        if use_fast_fuzzy {
+        if query_ctx.use_fast_fuzzy {
             warn!("[ READER @ {} ] 'Normal' queries will behave differently with TEXT type fields due to fast-fuzzy.", &index_name);
         }
 
+        let query_handler = QueryHandler::create(index, query_ctx)?;
         let limiter = Semaphore::new(max_concurrency);
 
         let name = index_name.clone();
@@ -158,11 +144,8 @@ impl IndexReaderHandler {
             limiter,
             max_concurrency,
             thread_pool,
-            parser: Arc::new(parser),
-            search_fields: Arc::new(search_fields),
-            schema: schema_copy,
-            use_fast_fuzzy,
-            strip_stop_words,
+            query_handler,
+            schema: index.schema(),
         })
     }
 

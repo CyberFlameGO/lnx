@@ -34,7 +34,7 @@ impl StorageManager {
             let data = fs::read(file.path()).await?;
 
             let loader = serde_json::from_slice::<IndexDeclaration>(&data)?;
-            let loaded = loader.into_schema();
+            let loaded = loader.try_into_schema()?;
 
             indexes.push(loaded);
         }

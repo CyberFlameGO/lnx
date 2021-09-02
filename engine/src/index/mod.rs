@@ -1,27 +1,23 @@
 use std::sync::Arc;
+use std::path;
 
 use anyhow::{Error, Result};
-use parking_lot::Mutex;
 use chrono::Utc;
 
-use tantivy::directory::MmapDirectory;
-use tantivy::query::QueryParser;
-use tantivy::schema::{Schema, Value, FieldType, Field};
-use tantivy::{Document, Index, IndexBuilder, ReloadPolicy, Term};
+use tantivy::schema::{Schema, Value, FieldType};
+use tantivy::{Document, ReloadPolicy, Term};
 use tokio::fs;
 use tokio::task::JoinHandle;
 
 use crate::correction;
 use crate::helpers::{self, hash};
 use crate::index::reader::QueryHit;
-use crate::structures::{self, IndexStorageType, LoadedIndex, QueryPayload, DocumentValue};
+use crate::structures::{self, LoadedIndex, QueryPayload, DocumentValue, INDEX_DATA_PATH};
 
 pub(super) mod reader;
 pub(super) mod writer;
 pub(super) mod queries;
 pub(super) mod executor;
-
-
 
 
 /// A search engine index.
@@ -40,9 +36,6 @@ pub struct IndexHandler {
     /// The name of the index.
     pub(crate) name: String,
 
-    /// The internal tantivy index.
-    _index: Mutex<Option<Index>>,
-
     /// The internal tantivy schema.
     schema: Schema,
 
@@ -54,9 +47,6 @@ pub struct IndexHandler {
 
     /// An indicator if the system is still alive or not
     alive: async_channel::Receiver<()>,
-
-    /// The optional storage directory of the index.
-    dir: Option<String>,
 
     /// The set of fields which are indexed.
     indexed_text_fields: Vec<String>,
@@ -76,23 +66,7 @@ impl IndexHandler {
     /// The amount of threads spawned is equal the the (`max_concurrency` * `reader_threads`) + `1`
     /// as well as the tokio runtime threads.
     pub(crate) async fn build_loaded(loader: LoadedIndex) -> Result<Self> {
-        let schema_copy = loader.index.schema();
-
-
-
-        let mut parser = QueryParser::for_index(&index, query_parser_search_fields.0.clone());
-        if loader.set_conjunction_by_default {
-            parser.set_conjunction_by_default();
-        }
-
-        for i in 0..query_parser_search_fields.0.len() {
-            let boost = query_parser_search_fields.1[i];
-            if boost != 0.0f32 {
-                let field = query_parser_search_fields.0[i];
-                parser.set_field_boost(field, boost);
-            }
-        }
-
+        let index = loader.index;
         let writer = index.writer_with_num_threads(loader.writer_threads, loader.writer_buffer)?;
         info!(
             "[ WRITER @ {} ] index writer has been allocated with {} threads and {} byte allocation",
@@ -121,21 +95,16 @@ impl IndexHandler {
             loader.max_concurrency as usize,
             reader,
             loader.reader_threads as usize,
-            parser,
-            fuzzy_query_search_fields,
-            schema_copy,
-            loader.use_fast_fuzzy,
-            loader.strip_stop_words,
+            &index,
+            &loader.query_ctx
         )?;
 
         Ok(Self {
             name: loader.name,
             schema: index.schema(),
-            _index: Mutex::new(Some(index)),
             writer: worker_handler,
             reader: reader_handler,
             alive: receiver,
-            dir,
             indexed_text_fields: fuzzy_query_search_fields,
             use_fast_fuzzy: loader.use_fast_fuzzy,
         })
@@ -376,11 +345,9 @@ impl IndexHandler {
         debug!("[ ENGINE ] waiting on writer shutdown...");
         self.alive.recv().await?;
 
-        let item = self._index.lock().take();
-        drop(item); // lets see if this closes the dir?
-
         debug!("[ ENGINE ] cleaning up directory");
-        if let Some(dir) = self.dir.as_ref() {
+        let dir = format!("{}/{}", INDEX_DATA_PATH, &self.name);
+        if path::Path::new(&dir).exists() {
             fs::remove_dir_all(dir).await?;
         }
         Ok(())
