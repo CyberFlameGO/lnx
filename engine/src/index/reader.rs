@@ -20,7 +20,8 @@ use tokio::sync::{oneshot, Semaphore};
 
 use crate::correction::{self, correct_sentence};
 use crate::structures::{QueryMode, QueryPayload};
-use crate::index::executor::ExecutorPool;
+use super::executor::ExecutorPool;
+
 use std::borrow::Borrow;
 use chrono::Utc;
 

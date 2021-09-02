@@ -1,6 +1,7 @@
 use core::fmt;
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::fs;
 
 use anyhow::{Error, Result};
 use chrono::Utc;
@@ -19,9 +20,11 @@ use tantivy::schema::{
     STRING,
     TEXT,
 };
-use tantivy::{DateTime, Score};
+use tantivy::{DateTime, Score, Index};
 
 use crate::helpers::hash;
+
+static INDEX_DATA_PATH: &str = "./lnx/index-data";
 
 /// A declared schema field type.
 ///
@@ -91,7 +94,33 @@ pub struct IndexDeclaration {
 }
 
 impl IndexDeclaration {
-    pub(crate) fn into_schema(self) -> LoadedIndex {
+    pub(crate) fn try_into_schema(self) -> Result<LoadedIndex> {
+        if tantivy::Index::exists(&format!("{}/{}", INDEX_DATA_PATH, &self.name))? {
+            self.build_from_existing()
+        } else {
+            self.build_from_scratch()
+        }
+    }
+
+    fn build_from_existing(self) -> Result<LoadedIndex> {
+        let index = Index::open_in_dir(&format!("{}/{}", INDEX_DATA_PATH, &self.name))?;
+
+        Ok(LoadedIndex {
+            name: self.name.into(),
+            writer_buffer: self.writer_buffer,
+            writer_threads: self.writer_threads.unwrap_or_else(|| num_cpus::get()),
+            max_concurrency: self.max_concurrency,
+            reader_threads: self.reader_threads.unwrap_or(1),
+            search_fields: self.search_fields,
+            index,
+            boost_fields: self.boost_fields,
+            set_conjunction_by_default: self.set_conjunction_by_default,
+            use_fast_fuzzy: self.use_fast_fuzzy,
+            strip_stop_words: self.strip_stop_words,
+        })
+    }
+
+    fn build_from_scratch(self) -> Result<LoadedIndex> {
         let mut schema = InternalSchemaBuilder::new();
 
         let opts = IntOptions::default()
@@ -141,7 +170,6 @@ impl IndexDeclaration {
                             schema.add_text_field(&name, STORED);
                         }
 
-
                         let id = hash(&name);
                         let name = format!("_{}", id);
                         schema.add_text_field(&name, TEXT);
@@ -150,20 +178,29 @@ impl IndexDeclaration {
             };
         }
 
-        LoadedIndex {
+        let index = match self.storage_type {
+            IndexStorageType::Memory => Index::create_in_ram(schema.build())?,
+            IndexStorageType::TempDir => Index::create_from_tempdir(schema.build())?,
+            IndexStorageType::FileSystem => {
+                let path = &format!("{}/{}", INDEX_DATA_PATH, &self.name);
+                fs::create_dir_all(path)?;
+                Index::open_or_create(path, schema.build())?
+            }
+        };
+
+        Ok(LoadedIndex {
             name: self.name.into(),
             writer_buffer: self.writer_buffer,
             writer_threads: self.writer_threads.unwrap_or_else(|| num_cpus::get()),
             max_concurrency: self.max_concurrency,
             reader_threads: self.reader_threads.unwrap_or(1),
             search_fields: self.search_fields,
-            storage_type: self.storage_type,
-            schema: schema.build(),
+            index,
             boost_fields: self.boost_fields,
             set_conjunction_by_default: self.set_conjunction_by_default,
             use_fast_fuzzy: self.use_fast_fuzzy,
             strip_stop_words: self.strip_stop_words,
-        }
+        })
     }
 }
 
@@ -199,11 +236,8 @@ pub struct LoadedIndex {
     /// These values need to either be a fast field (ints) or TEXT.
     pub(crate) search_fields: Vec<String>,
 
-    /// The storage type for the index backend.
-    pub(crate) storage_type: IndexStorageType,
-
     /// The defined tantivy schema.
-    pub(crate) schema: InternalSchema,
+    pub(crate) index: Index,
 
     /// A set of fields to boost by a given factor.
     pub(crate) boost_fields: HashMap<String, Score>,

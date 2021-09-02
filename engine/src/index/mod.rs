@@ -19,15 +19,10 @@ use crate::structures::{self, IndexStorageType, LoadedIndex, QueryPayload, Docum
 pub(super) mod reader;
 pub(super) mod writer;
 pub(super) mod queries;
+pub(super) mod executor;
 
-static INDEX_DATA_PATH: &str = "./lnx/index-data";
 
-#[inline(always)]
-fn add_field_if_valid(pair: (Field, f32), valid_fields: &mut Vec<(Field, f32)>, field_type: &FieldType) {
-    if let FieldType::Str(_) = field_type {
-        valid_fields.push(pair);
-    }
-}
+
 
 /// A search engine index.
 ///
@@ -71,49 +66,6 @@ pub struct IndexHandler {
 }
 
 impl IndexHandler {
-    /// Gets a tantivy Index either from an existing directory or
-    /// makes a new system.
-    async fn get_index_from_loader(loader: &LoadedIndex) -> Result<(Index, Option<String>)> {
-        if let IndexStorageType::FileSystem = &loader.storage_type {
-            let path = format!("{}/{}", INDEX_DATA_PATH, &loader.name);
-            if std::path::Path::new(&path).exists() {
-                info!(
-                    "[ SETUP @ {} ] using existing schema metadata",
-                    &loader.name
-                );
-                return Ok((Index::open_in_dir(&path)?, Some(path.clone())));
-            }
-        }
-
-        let index = IndexBuilder::default()
-            .schema(loader.schema.clone());
-
-        let out = match &loader.storage_type {
-            IndexStorageType::TempDir => {
-                info!(
-                    "[ SETUP @ {} ] creating index in a temporary directory",
-                    &loader.name
-                );
-                (index.create_from_tempdir()?, None)
-            },
-            IndexStorageType::Memory => {
-                info!("[ SETUP @ {} ] creating index in memory", &loader.name);
-                (index.create_in_ram()?, None)
-            },
-            IndexStorageType::FileSystem => {
-                info!("[ SETUP @ {} ] creating index in directory", &loader.name);
-
-                let path = format!("{}/{}", INDEX_DATA_PATH, &loader.name);
-                fs::create_dir_all(&path).await?;
-
-                let dir = MmapDirectory::open(&path)?;
-                (index.open_or_create(dir)?, Some(path.clone()))
-            },
-        };
-
-        Ok(out)
-    }
-
     /// Creates a new index handler from a given loaded index.
     ///
     /// This constructs both the Tantivy index, thread pool and worker thread.
@@ -124,85 +76,9 @@ impl IndexHandler {
     /// The amount of threads spawned is equal the the (`max_concurrency` * `reader_threads`) + `1`
     /// as well as the tokio runtime threads.
     pub(crate) async fn build_loaded(loader: LoadedIndex) -> Result<Self> {
-        let (index, dir) = Self::get_index_from_loader(&loader).await?;
-        let schema_copy = index.schema();
+        let schema_copy = loader.index.schema();
 
-        let mut query_parser_search_fields = (vec![], vec![]);
-        let mut fuzzy_query_search_fields = vec![];
 
-        // We need to extract out the fields from name to id.
-        for ref_field in loader.search_fields {
-            let pre_processed_field = format!("_{}", hash(&ref_field));
-
-            // This checks if a search field is a indexed text field (it has a private field)
-            // that's used internally, since we pre-compute the correction behaviour before
-            // hand, we want to actually target those fields not the inputted fields.
-            match (
-                schema_copy.get_field(&ref_field),
-                schema_copy.get_field(&pre_processed_field),
-            ) {
-                (Some(standard), Some(pre_processed)) => {
-                    let boost = if let Some(boost) = loader.boost_fields.get(&ref_field) {
-                        debug!("boosting field for query parser {} {}", &ref_field, boost);
-                        *boost
-                    } else {
-                        0f32
-                    };
-
-                    if loader.use_fast_fuzzy && correction::enabled() {
-                        query_parser_search_fields.0.push(pre_processed);
-                        query_parser_search_fields.1.push(boost);
-
-                        let field_type = schema_copy.get_field_entry(pre_processed);
-                        add_field_if_valid(
-                            (pre_processed, boost),
-                            &mut fuzzy_query_search_fields,
-                            field_type.field_type(),
-                        );
-                    } else {
-                        query_parser_search_fields.0.push(standard);
-                        query_parser_search_fields.1.push(boost);
-
-                        let field_type = schema_copy.get_field_entry(standard);
-                        add_field_if_valid(
-                            (pre_processed, boost),
-                            &mut fuzzy_query_search_fields,
-                            field_type.field_type(),
-                        );
-                    }
-                },
-                (Some(field), None) => {
-                    let boost = if let Some(boost) = loader.boost_fields.get(&ref_field) {
-                        debug!("boosting field for query parser {} {}", &ref_field, boost);
-                        *boost
-                    } else {
-                         0.0f32
-                    };
-
-                    query_parser_search_fields.0.push(field);
-                    query_parser_search_fields.1.push(boost);
-
-                    let field_type = schema_copy.get_field_entry(field);
-                    add_field_if_valid(
-                        (field, boost),
-                        &mut fuzzy_query_search_fields,
-                        field_type.field_type(),
-                    );
-                },
-                (None, _) => {
-                    let fields: Vec<String> = schema_copy
-                        .fields()
-                        .map(|(_, v)| v.name().to_string())
-                        .collect();
-
-                    return Err(Error::msg(format!(
-                        "you defined the schema with the following fields: {:?} \
-                        and declared the a search_field {:?} but this does not exist in the defined fields.",
-                        fields, &ref_field
-                    )));
-                },
-            };
-        }
 
         let mut parser = QueryParser::for_index(&index, query_parser_search_fields.0.clone());
         if loader.set_conjunction_by_default {
