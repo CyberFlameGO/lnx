@@ -9,19 +9,19 @@ mod state;
 extern crate log;
 
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use engine::structures::IndexDeclaration;
 use engine::{Engine, StorageBackend};
 use fern::colors::{Color, ColoredLevelConfig};
-use hyper::Server;
 use log::LevelFilter;
-use poem::{Endpoint, EndpointExt, IntoResponse, Request, Response, Route};
+use poem::{Endpoint, EndpointExt, IntoResponse, Request, Response, Route, Server};
+use poem::http::Method;
 use poem::listener::TcpListener;
 use poem::middleware::Cors;
 use poem_openapi::{LicenseObject, OpenApiService};
-use routerify::RouterService;
 use structopt::StructOpt;
 
 use crate::auth::AuthManager;
@@ -192,7 +192,9 @@ async fn start(settings: Settings) -> Result<()> {
 
     if settings.cors_methods != "*" {
         let methods = settings.cors_methods.split(",");
-        let methods: Vec<String> = methods.map(String::from).collect();
+        let methods: Vec<Method> = methods
+            .filter_map(|v| Method::from_str(v).ok())
+            .collect();
         cors = cors.allow_methods(methods)
     }
 
@@ -255,7 +257,7 @@ async fn create_state(settings: &Settings) -> Result<State> {
 
 
 /// Logs any requests and their relevant responses.
-async fn log<E: Endpoint>(next: E, req: Request) -> Result<Response> {
+async fn log<E: Endpoint>(next: E, req: Request) -> poem::Result<Response> {
     let method = req.method().clone();
     let path = req.uri().clone();
 
