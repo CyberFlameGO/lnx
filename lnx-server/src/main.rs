@@ -18,12 +18,16 @@ use engine::structures::IndexDeclaration;
 use engine::{Engine, StorageBackend};
 use fern::colors::{Color, ColoredLevelConfig};
 use log::LevelFilter;
+use mimalloc::MiMalloc;
 use poem::{Endpoint, EndpointExt, IntoResponse, Request, Response, Route, Server};
 use poem::http::Method;
 use poem::listener::TcpListener;
 use poem::middleware::Cors;
 use poem_openapi::{LicenseObject, OpenApiService};
 use structopt::StructOpt;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 use crate::auth::AuthManager;
 use crate::state::State;
@@ -99,7 +103,7 @@ fn main() {
         },
     };
 
-    let threads = settings.runtime_threads.unwrap_or_else(|| num_cpus::get());
+    let threads = settings.runtime_threads.unwrap_or_else(num_cpus::get);
     info!("starting runtime with {} threads", threads);
     let maybe_runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
@@ -146,6 +150,7 @@ fn setup_logger(
             ))
         })
         .level(level)
+        .level_for("compress", LevelFilter::Off)
         .chain(std::io::stdout());
 
     if let Some(file) = log_file {
@@ -183,6 +188,22 @@ async fn start(settings: Settings) -> Result<()> {
     let ui = api_service.redoc();
     let spec = api_service.spec();
 
+    info!("");
+    info!("");
+    info!("Lnx is starting!");
+    info!(
+        "serving requests @ http://{}:{}",
+        &settings.host, settings.port
+    );
+    info!("");
+    info!("GitHub: https://github.com/lnx-search/lnx");
+    info!("To ask questions visit: https://github.com/lnx-search/lnx/discussions");
+    info!("");
+    info!(
+        "To get started you can check out the documentation @ http://{}:{}/docs",
+        &settings.host, settings.port
+    );
+
     let mut cors = Cors::new();
 
     if settings.cors_origins != "*" {
@@ -217,6 +238,9 @@ async fn start(settings: Settings) -> Result<()> {
         )
         .await?;
 
+    info!("shutting down engine...");
+    state.engine.shutdown().await?;
+
     Ok(())
 }
 
@@ -224,20 +248,20 @@ async fn create_state(settings: &Settings) -> Result<State> {
     let storage = StorageBackend::connect(Some(STORAGE_PATH.to_string()))?;
     let engine = {
         info!("loading existing indexes...");
-        let existing_indexes: Vec<IndexDeclaration>;
-        if let Some(buff) = storage.load_structure(INDEX_KEYSPACE)? {
+        let raw_structure = storage.load_structure(INDEX_KEYSPACE)?;
+        let existing_indexes: Vec<IndexDeclaration> = if let Some(buff) = raw_structure {
             let buffer: Vec<u8> = bincode::deserialize(&buff)?;
-            existing_indexes = serde_json::from_slice(&buffer)?;
+            serde_json::from_slice(&buffer)?
         } else {
-            existing_indexes = vec![];
-        }
+            vec![]
+        };
 
         info!(
             " {} existing indexes discovered, recreating state...",
             existing_indexes.len()
         );
 
-        let engine = Engine::new();
+        let engine = Engine::default();
         for index in existing_indexes {
             engine.add_index(index, true).await?;
         }
@@ -251,7 +275,7 @@ async fn create_state(settings: &Settings) -> Result<State> {
         (false, String::new())
     };
 
-    let auth = AuthManager::new(enabled, key);
+    let auth = AuthManager::new(enabled, key, &storage)?;
 
     Ok(State::new(engine, storage, auth, !settings.silent_search))
 }

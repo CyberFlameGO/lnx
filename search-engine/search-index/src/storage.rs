@@ -13,24 +13,20 @@ use tantivy::Directory;
 #[derive(Clone)]
 pub struct StorageBackend {
     fp: Option<String>,
-    conn: Arc<Box<dyn Directory>>,
+    conn: Arc<dyn Directory>,
 }
 
 impl StorageBackend {
     /// Connects to the sqlite DB.
     pub fn connect(fp: Option<String>) -> Result<Self> {
-        let conn: Box<dyn Directory>;
-        if let Some(ref fp) = fp {
+        let conn: Arc<dyn Directory> = if let Some(ref fp) = fp {
             std::fs::create_dir_all(fp)?;
-            conn = Box::new(MmapDirectory::open(fp)?)
+            Arc::new(MmapDirectory::open(fp)?)
         } else {
-            conn = Box::new(RamDirectory::create());
-        }
+            Arc::new(RamDirectory::create())
+        };
 
-        Ok(Self {
-            fp,
-            conn: Arc::new(conn),
-        })
+        Ok(Self { fp, conn })
     }
 
     pub fn store_structure<T: Serialize>(

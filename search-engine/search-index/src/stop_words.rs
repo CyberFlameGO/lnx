@@ -19,13 +19,13 @@ static DEFAULT_WORDS: OnceCell<Vec<String>> = OnceCell::new();
 /// The words are extracted from the bundled compressed stop_words binary
 /// and split on a line by line basis.
 fn init_default_words() -> Result<()> {
-    if let Some(_) = DEFAULT_WORDS.get() {
+    if DEFAULT_WORDS.get().is_some() {
         return Ok(());
     }
 
     let mut default_words = Vec::new();
     let buffer: &[u8] = include_bytes!("../_dist/stop_words");
-    if buffer.len() != 0 {
+    if !buffer.is_empty() {
         let mut data = GzDecoder::new(vec![]);
         data.write_all(buffer)?;
         let data = data.finish()?;
@@ -33,8 +33,8 @@ fn init_default_words() -> Result<()> {
         let words = String::from_utf8(data)
             .map_err(|_| Error::msg("failed to parse stop words from linked data."))?;
 
-        for word in words.to_lowercase().split("\n") {
-            if let Some(word) = word.strip_suffix("\r") {
+        for word in words.to_lowercase().split('\n') {
+            if let Some(word) = word.strip_suffix('\r') {
                 default_words.push(word.to_string());
             }
         }
@@ -64,8 +64,8 @@ impl StopWordManager {
 
     /// Checks if the given word is in the list of stop words.
     #[inline]
-    pub fn is_stop_word(&self, word: &String) -> bool {
-        self.index_stop_words.load().contains(&word)
+    pub fn is_stop_word(&self, word: &str) -> bool {
+        self.index_stop_words.load().iter().any(|v| v == word)
     }
 
     /// Gets all the stop words for the given index.
@@ -99,7 +99,7 @@ impl StopWordManager {
 
     /// Removes a set of stop words from the index's specific set if it exists.
     pub fn remove_stop_words(&self, mut words: Vec<String>) {
-        words = words.drain(..).map(|v| v.to_lowercase()).collect();
+        words = words.into_iter().map(|v| v.to_lowercase()).collect();
 
         let new_words: Vec<String> = {
             let guard = self.index_stop_words.load();
@@ -140,12 +140,13 @@ impl PersistentStopWordManager {
     /// Creates a new `PersistentStopWordManager`.
     pub(crate) fn new(conn: StorageBackend, manager: StopWordManager) -> Result<Self> {
         debug!("[ STOP-WORDS ] loading stop words from persistent store");
-        let words: Vec<String>;
-        if let Some(buff) = conn.load_structure(Self::KEYSPACE)? {
-            words = deserialize(&buff)?;
+
+        let raw_structure = conn.load_structure(Self::KEYSPACE)?;
+        let words: Vec<String> = if let Some(buff) = raw_structure {
+            deserialize(&buff)?
         } else {
-            words = vec![];
-        }
+            vec![]
+        };
 
         let count = words.len();
         manager.add_stop_words(words);

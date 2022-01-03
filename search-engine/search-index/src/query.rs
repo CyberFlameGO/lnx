@@ -21,6 +21,7 @@ use tantivy::schema::{
     Facet,
     FacetParseError,
     Field,
+    FieldEntry,
     FieldType,
     IndexRecordOption,
     Schema,
@@ -89,13 +90,20 @@ pub enum QueryKind {
     MoreLikeThis,
 
     /// Get results matching the given term for the given field.
-    Term(String),
+    Term(FieldSelector),
 }
 
 impl Default for QueryKind {
     fn default() -> Self {
         Self::Fuzzy
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum FieldSelector {
+    Single(String),
+    Multi(Vec<String>),
 }
 
 /// Defines whether a term in a query must be present,
@@ -109,8 +117,10 @@ pub enum Occur {
     ///
     /// This is the default.
     Should,
+
     /// Document without the term are excluded from the search.
     Must,
+
     /// Document that contain the term are excluded from the
     /// search.
     MustNot,
@@ -284,6 +294,12 @@ impl QueryBuilder {
         Ok(Box::new(BooleanQuery::new(parts)))
     }
 
+    /// Gets a list of suggested corrections based off of the index corpus.
+    pub(crate) fn get_corrections(&self, query: &str) -> Vec<String> {
+        // TODO: reflect single output changes
+        vec![self.corrections.correct(query)]
+    }
+
     /// Gets the unique document id field.
     #[inline]
     pub(crate) fn id_field(&self) -> Field {
@@ -296,7 +312,7 @@ impl QueryBuilder {
             QueryKind::Fuzzy => self.make_fuzzy_query(qry.value),
             QueryKind::Normal => self.make_normal_query(qry.value),
             QueryKind::MoreLikeThis => self.make_more_like_this_query(qry.value).await,
-            QueryKind::Term(field) => self.make_term_query(qry.value, &field),
+            QueryKind::Term(field) => self.make_term_query(qry.value, field),
         }
     }
 
@@ -409,7 +425,7 @@ impl QueryBuilder {
                     &TopDocs::with_limit(1),
                     executor,
                 )?;
-                if results.len() == 0 {
+                if results.is_empty() {
                     return Err(Error::msg(format!(
                         "no document exists with id: '{}'",
                         id
@@ -443,8 +459,39 @@ impl QueryBuilder {
     fn make_term_query(
         &self,
         value: DocumentValue,
-        field: &str,
+        field: FieldSelector,
     ) -> Result<Box<dyn Query>> {
+        use tantivy::query::Occur;
+
+        let fields = {
+            match field {
+                FieldSelector::Single(field) => {
+                    vec![self.get_searchable_field(&field)?]
+                },
+                FieldSelector::Multi(fields) => {
+                    let mut search_fields = Vec::with_capacity(fields.len());
+                    for field in fields {
+                        search_fields.push(self.get_searchable_field(&field)?);
+                    }
+
+                    search_fields
+                },
+            }
+        };
+
+        let mut queries: Vec<(Occur, Box<dyn Query>)> = Vec::with_capacity(fields.len());
+        for field in fields {
+            let entry = self.schema.get_field_entry(field);
+            let term = convert_to_term(value.clone(), field, entry)?;
+
+            let query = TermQuery::new(term, IndexRecordOption::Basic);
+            queries.push((Occur::Must, Box::new(query)));
+        }
+
+        Ok(Box::new(BooleanQuery::new(queries)))
+    }
+
+    fn get_searchable_field(&self, field: &str) -> Result<Field> {
         let field = self.schema.get_field(field).ok_or_else(|| {
             Error::msg(format!("no field exists with name: {:?}", field))
         })?;
@@ -456,35 +503,7 @@ impl QueryBuilder {
             ));
         }
 
-        let term = match entry.field_type() {
-            FieldType::U64(_) => Term::from_field_u64(field, value.try_into()?),
-            FieldType::I64(_) => Term::from_field_i64(field, value.try_into()?),
-            FieldType::F64(_) => Term::from_field_f64(field, value.try_into()?),
-            FieldType::Str(_) => {
-                let value: String = value.try_into()?;
-                Term::from_field_text(field, &value)
-            },
-            FieldType::HierarchicalFacet(_) => {
-                let facet: String = value.try_into()?;
-
-                let facet = Facet::from_text(&facet).map_err(|e| {
-                    let e = match e {
-                        FacetParseError::FacetParseError(e) => e,
-                    };
-                    Error::msg(e)
-                })?;
-
-                Term::from_facet(field, &facet)
-            },
-            FieldType::Date(_) => {
-                let dt: DateTime = value.try_into()?;
-                Term::from_field_date(field, &dt)
-            },
-            _ => return Err(Error::msg("the given field is a unsupported type")),
-        };
-
-        let query = TermQuery::new(term, IndexRecordOption::Basic);
-        Ok(Box::new(query))
+        Ok(field)
     }
 }
 
@@ -507,4 +526,37 @@ fn get_parser(ctx: &QueryContext, index: &Index) -> QueryParser {
     }
 
     parser
+}
+
+fn convert_to_term(
+    value: DocumentValue,
+    field: Field,
+    entry: &FieldEntry,
+) -> Result<Term> {
+    let term = match entry.field_type() {
+        FieldType::U64(_) => Term::from_field_u64(field, value.try_into()?),
+        FieldType::I64(_) => Term::from_field_i64(field, value.try_into()?),
+        FieldType::F64(_) => Term::from_field_f64(field, value.try_into()?),
+        FieldType::Str(_) => {
+            let value: String = value.try_into()?;
+            Term::from_field_text(field, &value)
+        },
+        FieldType::HierarchicalFacet(_) => {
+            let facet: String = value.try_into()?;
+
+            let facet = Facet::from_text(&facet).map_err(|e| {
+                let FacetParseError::FacetParseError(e) = e;
+                Error::msg(e)
+            })?;
+
+            Term::from_facet(field, &facet)
+        },
+        FieldType::Date(_) => {
+            let dt: DateTime = value.try_into()?;
+            Term::from_field_date(field, &dt)
+        },
+        _ => return Err(Error::msg("the given field is a unsupported type")),
+    };
+
+    Ok(term)
 }

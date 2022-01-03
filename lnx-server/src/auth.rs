@@ -9,6 +9,8 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+static KEYSPACE: &str = "index_tokens";
+
 pub mod permissions {
     /// Users with this permission can create and delete indexes.
     ///
@@ -69,6 +71,14 @@ impl TokenData {
     pub fn has_permissions(&self, flags: usize) -> bool {
         self.permissions & flags != 0
     }
+
+    pub fn has_access_to_index(&self, index: &str) -> bool {
+        if let Some(ref indexes) = self.allowed_indexes {
+            indexes.iter().any(|v| v == index)
+        } else {
+            true
+        }
+    }
 }
 
 /// A controller that manages all of the system access tokens.
@@ -88,7 +98,11 @@ impl AuthManager {
     /// The super user key is simply used as a default key to allow people to
     /// access the control endpoints for the first time.
     /// The super user key can be revoked.
-    pub fn new(enabled: bool, super_user_key: String) -> Self {
+    pub fn new(
+        enabled: bool,
+        super_user_key: String,
+        storage: &StorageBackend,
+    ) -> Result<Self> {
         let super_user_data = TokenData {
             token: super_user_key.clone(),
             allowed_indexes: None,
@@ -101,12 +115,19 @@ impl AuthManager {
         };
 
         let mut map = HashMap::new();
+        if let Some(data) = storage.load_structure(KEYSPACE)? {
+            let tokens: Vec<TokenData> = bincode::deserialize(&data)?;
+            for token in tokens {
+                map.insert(token.token.to_string(), Arc::new(token));
+            }
+        }
+
         map.insert(super_user_key, Arc::new(super_user_data));
 
-        Self {
+        Ok(Self {
             auth_enabled: enabled,
             keys: Arc::new(ArcSwap::from_pointee(map)),
-        }
+        })
     }
 
     /// Is authorization enabled or disabled.
@@ -196,7 +217,7 @@ impl AuthManager {
     /// Gets a specific access token's metadata.
     pub fn get_token_data(&self, token: &str) -> Option<Arc<TokenData>> {
         let guard = self.keys.load();
-        guard.get(token).map(|v| v.clone())
+        guard.get(token).cloned()
     }
 
     /// Revoke a given access token.
@@ -227,7 +248,7 @@ impl AuthManager {
             let ref_tokens: Vec<&TokenData> =
                 tokens.iter().map(|v| v.as_ref()).collect();
 
-            storage.store_structure("index_tokens", &ref_tokens)
+            storage.store_structure(KEYSPACE, &ref_tokens)
         })
         .await?
     }

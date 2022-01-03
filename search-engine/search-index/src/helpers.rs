@@ -45,6 +45,8 @@ pub(crate) trait FrequencyCounter {
 
     fn register(&mut self, k: String);
 
+    fn clear_frequencies(&mut self);
+
     fn get_count(&self, k: &str) -> u32;
 
     fn counts(&self) -> &HashMap<String, u32>;
@@ -99,8 +101,12 @@ impl FrequencyCounter for FrequencySet {
         self.inner.insert(k, v);
     }
 
+    fn clear_frequencies(&mut self) {
+        self.inner = HashMap::new();
+    }
+
     fn get_count(&self, k: &str) -> u32 {
-        self.inner.get(k).map(|v| *v).unwrap_or(0u32)
+        self.inner.get(k).copied().unwrap_or(0u32)
     }
 
     fn counts(&self) -> &HashMap<String, u32> {
@@ -130,11 +136,11 @@ impl PersistentFrequencySet {
     fn load_frequencies_from_store(&mut self) -> Result<()> {
         info!("[ FREQUENCY-COUNTER ] loading frequencies from persistent backend.");
 
-        let frequencies: HashMap<String, u32>;
-        if let Some(buff) = self.conn.load_structure(Self::KEYSPACE)? {
-            frequencies = deserialize(&buff)?;
+        let raw_structure = self.conn.load_structure(Self::KEYSPACE)?;
+        let frequencies: HashMap<String, u32> = if let Some(buff) = raw_structure {
+            deserialize(&buff)?
         } else {
-            frequencies = HashMap::new();
+            HashMap::new()
         };
 
         for (word, count) in frequencies {
@@ -165,6 +171,10 @@ impl FrequencyCounter for PersistentFrequencySet {
 
     fn register(&mut self, k: String) {
         self.set.register(k)
+    }
+
+    fn clear_frequencies(&mut self) {
+        self.set.clear_frequencies();
     }
 
     fn get_count(&self, k: &str) -> u32 {

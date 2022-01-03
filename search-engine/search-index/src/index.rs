@@ -38,6 +38,11 @@ impl Index {
         self.0.rollback().await
     }
 
+    /// Gets a list of suggested corrections based off of the index corpus.
+    pub fn get_corrections(&self, query: &str) -> Vec<String> {
+        self.0.get_corrections(query)
+    }
+
     /// Search the index for the given query.
     ///
     /// This returns a set of results ordered by their relevance according to
@@ -142,6 +147,11 @@ impl InternalIndex {
     /// Discards any changes to the index since the last commit.
     async fn rollback(&self) -> Result<()> {
         self.writer.send_op(WriterOp::Rollback).await
+    }
+
+    /// Gets a list of suggested corrections based off of the index corpus.
+    pub(crate) fn get_corrections(&self, query: &str) -> Vec<String> {
+        self.reader.get_corrections(query)
     }
 
     /// Search the index for the given query.
@@ -653,7 +663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_buffer_expect_err() -> Result<()> {
+    async fn zero_buffer_expect_defaulting() -> Result<()> {
         init_state();
 
         let res = get_index_with(serde_json::json!({
@@ -693,7 +703,49 @@ mod tests {
         }))
         .await;
 
-        assert!(res.is_err());
+        assert!(res.is_ok());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn default_writer_settings_expect_ok() -> Result<()> {
+        init_state();
+
+        let res = get_index_with(serde_json::json!({
+            "name": "test_index_0_buffer_expect_err",
+
+            // Reader context
+            "reader_threads": 1,
+            "max_concurrency": 1,
+
+            "storage_type": "memory",
+            "fields": {
+                "title": {
+                    "type": "text",
+                    "stored": true
+                },
+                "description": {
+                    "type": "string",
+                    "stored": false
+                },
+                "count": {
+                   "type": "u64",
+                   "stored": true,
+                   "indexed": true,
+                   "fast": "single"
+                },
+            },
+
+            // The query context
+            "search_fields": [
+                "title",
+                "description",
+            ],
+        }))
+        .await;
+
+        assert!(res.is_ok());
 
         Ok(())
     }
