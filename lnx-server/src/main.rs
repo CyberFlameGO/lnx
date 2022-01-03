@@ -4,6 +4,7 @@ mod helpers;
 mod responders;
 mod routes;
 mod state;
+mod utils;
 
 #[macro_use]
 extern crate log;
