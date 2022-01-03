@@ -3,15 +3,18 @@ name = "lnx"
 version = "0.6.0"
 authors = ["Harrison Burt <57491488+ChillFish8@users.noreply.github.com>"]
 edition = "2018"
+description = "The adaptable deployment of the tantivy search engine. Standing on the shoulders of giants. "
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "rt", "signal"] }
-fern = { version = "0.6", features = ["colored"] }
+poem-openapi = { version = "1.2", features = ["redoc", "uuid"] }
+poem = { version = "1.2", features = ["anyhow", "opentelemetry"] }
 chrono = { version = "0.4", features = ["serde"] }
 hashbrown = { version = "0.11", features = ["serde"] }
+fern = { version = "0.6", features = ["colored"] }
 hyper = { version = "0.14", features = ["server", "http1", "http2"] }
 
 thiserror = "1.0.30"

@@ -9,6 +9,7 @@ mod state;
 extern crate log;
 
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use engine::structures::IndexDeclaration;
@@ -16,6 +17,10 @@ use engine::{Engine, StorageBackend};
 use fern::colors::{Color, ColoredLevelConfig};
 use hyper::Server;
 use log::LevelFilter;
+use poem::{Endpoint, EndpointExt, IntoResponse, Request, Response, Route};
+use poem::listener::TcpListener;
+use poem::middleware::Cors;
+use poem_openapi::{LicenseObject, OpenApiService};
 use routerify::RouterService;
 use structopt::StructOpt;
 
@@ -46,6 +51,20 @@ struct Settings {
     #[structopt(long, short, default_value = "8000", env)]
     port: u16,
 
+    /// Optional CORS allowed origins.
+    ///
+    /// Multiple origins can be defined by separating with a ','
+    /// e.g. http://127.0.0.1:3000,http://foo.com
+    #[structopt(long, default_value = "*", env)]
+    cors_origins: String,
+
+    /// Optional CORS allowed methods.
+    ///
+    /// Each method should be seperated by a ','
+    /// e.g. GET,POST
+    #[structopt(long, default_value = "*", env)]
+    cors_methods: String,
+
     /// The super user key.
     ///
     /// If specified this will enable auth mode and require a token
@@ -65,6 +84,7 @@ struct Settings {
     #[structopt(long, env)]
     log_file: Option<String>,
 
+    /// If true this will stop logging each search request.
     #[structopt(long, env)]
     silent_search: bool,
 }
@@ -149,21 +169,50 @@ fn setup() -> Result<Settings> {
 
 async fn start(settings: Settings) -> Result<()> {
     let state = create_state(&settings).await?;
-    let router = routes::get_router(state.clone());
-    let service = RouterService::new(router).unwrap();
 
-    let address: SocketAddr = format!("{}:{}", &settings.host, settings.port).parse()?;
-    let server = Server::bind(&address).serve(service);
+    let api_service = OpenApiService::new(
+        (
+        ),
+        "Lnx API",
+        env!("CARGO_PKG_VERSION")
+        )
+        .description(env!("CARGO_PKG_DESCRIPTION"))
+        .server(format!("http://{}:{}", &settings.host, settings.port));
 
-    info!(
-        "serving requests @ http://{}:{}",
-        &settings.host, settings.port
-    );
-    if let Err(e) = server.await {
-        error!("server error: {:?}", e)
-    };
+    let ui = api_service.redoc();
+    let spec = api_service.spec();
 
-    // todo add shutdown
+    let mut cors = Cors::new();
+
+    if settings.cors_origins != "*" {
+        let origins = settings.cors_origins.split(",");
+        let origins: Vec<String> = origins.map(String::from).collect();
+        cors = cors.allow_origins(origins)
+    }
+
+    if settings.cors_methods != "*" {
+        let methods = settings.cors_methods.split(",");
+        let methods: Vec<String> = methods.map(String::from).collect();
+        cors = cors.allow_methods(methods)
+    }
+
+    let app = Route::new()
+        .nest("/", api_service)
+        .nest("/ui", ui)
+        .at("/spec", poem::endpoint::make_sync(move |_| spec.clone()))
+        .with(cors.allow_credentials(true))
+        .around(log)
+        .data(state);
+
+    Server::new(TcpListener::bind("127.0.0.1:8000"))
+        .run_with_graceful_shutdown(
+            app,
+            async move {
+                let _ = tokio::signal::ctrl_c().await;
+            },
+            Some(Duration::from_secs(2)),
+        )
+        .await?;
 
     Ok(())
 }
@@ -203,3 +252,51 @@ async fn create_state(settings: &Settings) -> Result<State> {
 
     Ok(State::new(engine, storage, auth, !settings.silent_search))
 }
+
+
+/// Logs any requests and their relevant responses.
+async fn log<E: Endpoint>(next: E, req: Request) -> Result<Response> {
+    let method = req.method().clone();
+    let path = req.uri().clone();
+
+    let start = Instant::now();
+    let res = next.call(req).await;
+    let elapsed = start.elapsed();
+
+    match res {
+        Ok(r) => {
+            let resp = r.into_response();
+
+            info!(
+                "{} -> {} {} [ {:?} ] - {:?}",
+                method.as_str(),
+                resp.status().as_u16(),
+                resp.status().canonical_reason().unwrap_or(""),
+                elapsed,
+                path.path(),
+            );
+
+            Ok(resp)
+        },
+        Err(e) => {
+
+            let resp = e.as_response();
+
+            if resp.status().as_u16() >= 500 {
+                error!("{}", &e);
+            }
+
+            info!(
+                "{} -> {} {} [ {:?} ] - {:?}",
+                method.as_str(),
+                resp.status().as_u16(),
+                resp.status().canonical_reason().unwrap_or(""),
+                elapsed,
+                path.path(),
+            );
+
+            Err(e)
+        }
+    }
+}
+
